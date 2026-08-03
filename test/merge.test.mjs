@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import vm from 'node:vm'
 import { createMergedArchive, readHtmlArchive, updateMergedArchive } from '../src/merge.mjs'
 
 const assignment = 'window.__WECHAT_EXPORT__ = '
@@ -16,7 +17,10 @@ const writeSourceArchive = async ({ messages, name, root, sourceId, updatedAt })
   await writeFile(join(root, 'data', 'messages.js'), `${assignment}${JSON.stringify(archive)};\n`)
   await writeFile(
     join(root, 'index.html'),
-    `<!doctype html><title>${name} - 聊天记录</title><span class="title" id="title">${name}</span><script src="data/messages.js"></script>`
+    `<!doctype html><html><head><title>${name} - 聊天记录</title><style>body{margin:0}</style></head>` +
+      `<body><span class="title" id="title">${name}</span>` +
+      `<script src="data/messages.js"></script>` +
+      `<script>(() => { window.__sourceRuntimeRan = true })();</script></body></html>`
   )
 }
 
@@ -99,7 +103,19 @@ test('creates and incrementally refreshes a two-account archive', async () => {
     await readFile(join(output, 'accounts', 'jamie', 'media', 'jamie.jpg'), 'utf8'),
     'jamie-image'
   )
-  assert.match(await readFile(join(output, 'index.html'), 'utf8'), /<title>同一个人 - 聊天记录<\/title>/)
+  const indexHtml = await readFile(join(output, 'index.html'), 'utf8')
+  assert.match(indexHtml, /<title>同一个人 - 聊天记录<\/title>/)
+  assert.match(indexHtml, /id="archive-loading"/)
+  assert.match(indexHtml, /正在加载聊天记录/)
+  assert.match(indexHtml, /requestAnimationFrame\(\(\) => requestAnimationFrame\(loadArchive\)\)/)
+  assert.match(indexHtml, /dataScript\.src = 'data\/messages\.js'/)
+  assert.match(indexHtml, /window\.__sourceRuntimeRan = true/)
+  assert.doesNotMatch(indexHtml, /<script src="data\/messages\.js"><\/script>/)
+  const inlineScripts = [...indexHtml.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+    .map((match) => match[1])
+    .filter((source) => source.trim())
+  assert.equal(inlineScripts.length, 1)
+  assert.doesNotThrow(() => new vm.Script(inlineScripts[0], { filename: 'merged-index.js' }))
 
   const sourceAsset = await stat(join(jamie, 'media', 'jamie.jpg'))
   const mergedAsset = await stat(join(output, 'accounts', 'jamie', 'media', 'jamie.jpg'))
@@ -145,4 +161,3 @@ test('creates and incrementally refreshes a two-account archive', async () => {
   assert.equal(repeated.messageCount, 3)
   assert.equal((await readHtmlArchive(output)).archive.messages.length, 3)
 })
-

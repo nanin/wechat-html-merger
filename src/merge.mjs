@@ -20,6 +20,80 @@ const ARCHIVE_ASSIGNMENT = 'window.__WECHAT_EXPORT__ = '
 const CONFIG_FILE = 'merge-config.json'
 const RESOURCE_DIRS = ['avatars', 'media', 'voices', 'files']
 const LOCAL_RESOURCE_PREFIXES = RESOURCE_DIRS.map((name) => `${name}/`)
+const LOADING_STYLE = `
+.archive-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: #f2f7f4;
+  color: #1d2b26;
+  opacity: 1;
+  visibility: visible;
+  transition: opacity .2s ease, visibility .2s ease;
+}
+.archive-loading.ready { opacity: 0; visibility: hidden; pointer-events: none; }
+.archive-loading-inner { display: grid; justify-items: center; gap: 12px; padding: 24px; text-align: center; }
+.archive-loading-visual { position: relative; width: 66px; height: 58px; }
+.archive-loading-bubble {
+  position: absolute;
+  inset: 0 4px 10px 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 8px;
+  background: #23866f;
+  box-shadow: 0 8px 22px #173f3526;
+}
+.archive-loading-bubble::after {
+  content: '';
+  position: absolute;
+  right: 9px;
+  bottom: -8px;
+  border-width: 8px 0 0 11px;
+  border-style: solid;
+  border-color: transparent transparent transparent #23866f;
+}
+.archive-loading-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fff;
+  animation: archive-loading-pulse 1s ease-in-out infinite;
+}
+.archive-loading-dot:nth-child(2) { animation-delay: .14s; }
+.archive-loading-dot:nth-child(3) { animation-delay: .28s; }
+.archive-loading-title { font-size: 16px; font-weight: 650; }
+.archive-loading-detail { min-height: 20px; color: #6f7e78; font-size: 13px; }
+.archive-loading.failed .archive-loading-bubble { background: #b14a3b; }
+.archive-loading.failed .archive-loading-bubble::after { border-left-color: #b14a3b; }
+.archive-loading.failed .archive-loading-dot { display: none; }
+.archive-loading.failed .archive-loading-bubble::before { content: '!'; color: #fff; font-size: 28px; font-weight: 700; }
+@keyframes archive-loading-pulse {
+  0%, 70%, 100% { opacity: .4; transform: translateY(0); }
+  35% { opacity: 1; transform: translateY(-4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .archive-loading-dot { animation: none; }
+  .archive-loading { transition: none; }
+}
+`
+const LOADING_MARKUP = `
+  <div class="archive-loading" id="archive-loading" role="status" aria-live="polite">
+    <div class="archive-loading-inner">
+      <div class="archive-loading-visual" aria-hidden="true">
+        <div class="archive-loading-bubble">
+          <span class="archive-loading-dot"></span>
+          <span class="archive-loading-dot"></span>
+          <span class="archive-loading-dot"></span>
+        </div>
+      </div>
+      <div class="archive-loading-title" id="archive-loading-title">正在加载聊天记录</div>
+      <div class="archive-loading-detail" id="archive-loading-detail">消息较多，请稍候</div>
+    </div>
+  </div>`
 
 const exists = async (path) => {
   try {
@@ -172,12 +246,64 @@ const writeArchive = async (outputPath, metadata, messages) => {
 
 const patchIndexTemplate = (html, name) => {
   const escapedName = safeHtml(name)
-  return html
+  const namedHtml = html
     .replace(/<title>[\s\S]*?<\/title>/i, `<title>${escapedName} - 聊天记录</title>`)
     .replace(
       /(<span\s+class="title"\s+id="title">)[\s\S]*?(<\/span>)/i,
       `$1${escapedName}$2`
     )
+  const styledHtml = namedHtml.replace(/<\/style>/i, `${LOADING_STYLE}\n</style>`)
+  if (styledHtml === namedHtml) throw new Error('源档案页面缺少样式标签，无法添加加载状态')
+  const markedHtml = styledHtml.replace(/<body>/i, `<body>${LOADING_MARKUP}`)
+  if (markedHtml === styledHtml) throw new Error('源档案页面缺少 body，无法添加加载状态')
+
+  const scriptPattern =
+    /<script\s+src=["']data\/messages\.js["']><\/script>\s*<script>([\s\S]*?)<\/script>\s*(?=<\/body>)/i
+  const bootstrappedHtml = markedHtml.replace(scriptPattern, (_match, runtime) => `
+  <script>
+  (() => {
+    'use strict';
+    const loading = document.querySelector('#archive-loading');
+    const loadingTitle = document.querySelector('#archive-loading-title');
+    const loadingDetail = document.querySelector('#archive-loading-detail');
+    const fail = (message) => {
+      loading.classList.add('failed');
+      loadingTitle.textContent = '聊天记录加载失败';
+      loadingDetail.textContent = message;
+    };
+    const finish = () => {
+      loading.classList.add('ready');
+      window.setTimeout(() => loading.remove(), 240);
+    };
+    const startArchive = () => {
+      try {
+${runtime}
+        finish();
+      } catch (error) {
+        console.error(error);
+        fail(error instanceof Error ? error.message : String(error));
+      }
+    };
+    const loadArchive = () => {
+      const dataScript = document.createElement('script');
+      dataScript.src = 'data/messages.js';
+      dataScript.onload = startArchive;
+      dataScript.onerror = () => fail('未能读取 data/messages.js');
+      document.head.append(dataScript);
+    };
+    const begin = () => requestAnimationFrame(() => requestAnimationFrame(loadArchive));
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', begin, { once: true });
+    } else {
+      begin();
+    }
+  })();
+  </script>
+`)
+  if (bootstrappedHtml === markedHtml) {
+    throw new Error('无法替换源档案中的消息加载脚本，请先重新导出源档案')
+  }
+  return bootstrappedHtml
 }
 
 const writeIndex = async (outputPath, templatePath, name) => {
