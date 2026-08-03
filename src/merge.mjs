@@ -15,10 +15,8 @@ import {
 } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import { finished } from 'node:stream/promises'
-import { fileURLToPath } from 'node:url'
 
 const ARCHIVE_ASSIGNMENT = 'window.__WECHAT_EXPORT__ = '
-const MANIFEST_ASSIGNMENT = 'window.__WECHAT_MANIFEST__ = '
 const CONFIG_FILE = 'merge-config.json'
 const RESOURCE_DIRS = ['avatars', 'media', 'voices', 'files']
 const LOCAL_RESOURCE_PREFIXES = RESOURCE_DIRS.map((name) => `${name}/`)
@@ -147,131 +145,29 @@ const writeStreamChunk = async (stream, chunk) => {
   })
 }
 
-const writeMonthChunk = async (outputPath, key, hash, messages) => {
-  const monthsDir = join(outputPath, 'data', 'months')
-  const fileName = `${key}.${hash.slice(0, 16)}.js`
-  const destinationPath = join(monthsDir, fileName)
-  if (await exists(destinationPath)) return { fileName, written: false }
+const writeArchive = async (outputPath, metadata, messages) => {
+  const dataDir = join(outputPath, 'data')
+  const destinationPath = join(dataDir, 'messages.js')
   const temporaryPath = `${destinationPath}.tmp-${process.pid}`
-  await mkdir(monthsDir, { recursive: true })
+  await mkdir(dataDir, { recursive: true })
   const stream = createWriteStream(temporaryPath, { encoding: 'utf8' })
   try {
+    const metadataJson = safeJson(metadata)
     await writeStreamChunk(
       stream,
-      `window.__WECHAT_MONTH_CHUNKS__ = window.__WECHAT_MONTH_CHUNKS__ || {};\n` +
-        `window.__WECHAT_MONTH_CHUNKS__[${safeJson(key)}] = [`
+      `${ARCHIVE_ASSIGNMENT}${metadataJson.slice(0, -1)},"messages":[`
     )
     for (let index = 0; index < messages.length; index += 1) {
       await writeStreamChunk(stream, `${index ? ',' : ''}${safeJson(messages[index])}`)
     }
-    stream.end('];\n')
+    stream.end(']};\n')
     await finished(stream)
-    await replaceFileAtomically(temporaryPath, destinationPath)
-    return { fileName, written: true }
+    await replaceFileAtomically(temporaryPath, destinationPath, true)
   } catch (error) {
     stream.destroy()
     await rm(temporaryPath, { force: true })
     throw error
   }
-}
-
-const messageMonth = (message) => {
-  const datetimeMatch = String(message.datetime || '').match(/^(\d{4})[/-](\d{1,2})/)
-  if (datetimeMatch) {
-    const year = Number(datetimeMatch[1])
-    const month = Number(datetimeMatch[2])
-    if (year > 0 && month >= 1 && month <= 12) {
-      return { key: `${year}-${String(month).padStart(2, '0')}`, month, year }
-    }
-  }
-  const timestamp = archiveMessageTime(message)
-  if (!timestamp) throw new Error(`消息缺少有效时间：${message.id || message.localId || '未知消息'}`)
-  const date = new Date(timestamp)
-  const year = date.getFullYear()
-  const month = date.getMonth() + 1
-  return { key: `${year}-${String(month).padStart(2, '0')}`, month, year }
-}
-
-const groupMessagesByMonth = (messages) => {
-  const groups = new Map()
-  for (const message of messages) {
-    const period = messageMonth(message)
-    if (!groups.has(period.key)) groups.set(period.key, { ...period, messages: [] })
-    groups.get(period.key).messages.push(message)
-  }
-  return Array.from(groups.values()).sort((left, right) => left.key.localeCompare(right.key))
-}
-
-const hashMessages = (messages) => {
-  const hash = createHash('sha256')
-  for (const message of messages) hash.update(safeJson(message)).update('\n')
-  return hash.digest('hex')
-}
-
-const readManifest = async (outputPath) => {
-  const manifestPath = join(outputPath, 'data', 'manifest.js')
-  try {
-    const source = await readFile(manifestPath, 'utf8')
-    if (!source.startsWith(MANIFEST_ASSIGNMENT)) return null
-    return JSON.parse(source.slice(MANIFEST_ASSIGNMENT.length).replace(/;\s*$/, ''))
-  } catch {
-    return null
-  }
-}
-
-const writeManifest = async (outputPath, manifest) => {
-  const destinationPath = join(outputPath, 'data', 'manifest.js')
-  const temporaryPath = `${destinationPath}.tmp-${process.pid}`
-  await mkdir(dirname(destinationPath), { recursive: true })
-  await writeFile(temporaryPath, `${MANIFEST_ASSIGNMENT}${safeJson(manifest)};\n`, 'utf8')
-  await replaceFileAtomically(temporaryPath, destinationPath, true)
-}
-
-const cleanupOldMonthChunks = async (outputPath, currentFiles, previousFiles) => {
-  const monthsDir = join(outputPath, 'data', 'months')
-  if (!(await exists(monthsDir))) return
-  const keep = new Set([...currentFiles, ...previousFiles])
-  for (const entry of await readdir(monthsDir, { withFileTypes: true })) {
-    if (entry.isFile() && entry.name.endsWith('.js') && !keep.has(entry.name)) {
-      await rm(join(monthsDir, entry.name), { force: true })
-    }
-  }
-}
-
-const writeMonthlyArchive = async (outputPath, metadata, messages) => {
-  const previousManifest = await readManifest(outputPath)
-  const previousFiles = new Set(
-    Array.isArray(previousManifest?.months)
-      ? previousManifest.months.map((month) => String(month.file || '').split('/').pop())
-      : []
-  )
-  const months = []
-  let written = 0
-  for (const group of groupMessagesByMonth(messages)) {
-    const hash = hashMessages(group.messages)
-    const chunk = await writeMonthChunk(outputPath, group.key, hash, group.messages)
-    if (chunk.written) written += 1
-    months.push({
-      key: group.key,
-      year: group.year,
-      month: group.month,
-      count: group.messages.length,
-      hash,
-      file: `data/months/${chunk.fileName}`,
-      firstTime: group.messages[0]?.datetime || '',
-      lastTime: group.messages[group.messages.length - 1]?.datetime || ''
-    })
-  }
-  const totalMessages = months.reduce((total, month) => total + month.count, 0)
-  if (totalMessages !== messages.length) throw new Error('月份消息总数校验失败')
-  const manifest = { ...metadata, totalMessages, months }
-  await writeManifest(outputPath, manifest)
-  await cleanupOldMonthChunks(
-    outputPath,
-    months.map((month) => month.file.split('/').pop()),
-    previousFiles
-  )
-  return { manifest, written, reused: months.length - written }
 }
 
 const patchIndexTemplate = (html, name) => {
@@ -287,14 +183,7 @@ const patchIndexTemplate = (html, name) => {
 const writeIndex = async (outputPath, templatePath, name) => {
   const destinationPath = join(outputPath, 'index.html')
   const temporaryPath = `${destinationPath}.tmp-${process.pid}`
-  const runtimePath = fileURLToPath(new URL('./browser-runtime.js', import.meta.url))
-  const runtime = await readFile(runtimePath, 'utf8')
-  const sourceHtml = patchIndexTemplate(await readFile(templatePath, 'utf8'), name)
-  const scriptPattern =
-    /<script\s+src="data\/messages\.js"><\/script>\s*<script>[\s\S]*?<\/script>\s*(?=<\/body>)/i
-  const replacement = `<script src="data/manifest.js"></script>\n  <script>\n${runtime}\n  </script>\n`
-  const html = sourceHtml.replace(scriptPattern, () => replacement)
-  if (html === sourceHtml) throw new Error('无法替换源档案中的页面运行时，请先重新导出源档案')
+  const html = patchIndexTemplate(await readFile(templatePath, 'utf8'), name)
   await writeFile(temporaryPath, html, 'utf8')
   await replaceFileAtomically(temporaryPath, destinationPath, true)
 }
@@ -429,7 +318,7 @@ const mergeSources = async ({ createdAt, name, outputPath, sourceConfigs }) => {
       messageCount: source.archive.messages.length
     }))
   }
-  const monthlyArchive = await writeMonthlyArchive(output, archiveMetadata, messages)
+  await writeArchive(output, archiveMetadata, messages)
   const templateSource = [...sources].sort(
     (left, right) => right.indexMtimeMs - left.indexMtimeMs
   )[0]
@@ -450,16 +339,9 @@ const mergeSources = async ({ createdAt, name, outputPath, sourceConfigs }) => {
     }))
   }
   await writeConfig(output, config)
-  await rm(join(output, 'data', 'messages.js'), { force: true })
-  await rm(join(output, 'data', 'messages.js.bak'), { force: true })
   return {
     outputPath: output,
     messageCount: messages.length,
-    months: {
-      total: monthlyArchive.manifest.months.length,
-      written: monthlyArchive.written,
-      reused: monthlyArchive.reused
-    },
     sources: config.sources,
     resources: resourceSummary
   }
