@@ -40,6 +40,9 @@ const required = (options, key) => {
 const printResult = (result) => {
   console.log(`合并完成：${result.outputPath}`)
   console.log(`消息总数：${result.messageCount.toLocaleString('zh-CN')}`)
+  console.log(
+    `月份文件：共 ${result.months.total} 个，本次写入 ${result.months.written}，复用 ${result.months.reused}`
+  )
   for (const source of result.sources) {
     const resources = result.resources[source.id]
     console.log(
@@ -80,4 +83,3 @@ main().catch((error) => {
   console.error(`合并失败：${error instanceof Error ? error.message : String(error)}`)
   process.exitCode = 1
 })
-

@@ -8,7 +8,7 @@
     "wechat-html-merger": "src/cli.mjs"
   },
   "scripts": {
-    "check": "node --check src/merge.mjs && node --check src/cli.mjs",
+    "check": "node --check src/merge.mjs && node --check src/cli.mjs && node --check src/browser-runtime.js",
     "test": "node --test"
   },
   "engines": {
