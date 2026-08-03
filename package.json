@@ -1,0 +1,17 @@
+{
+  "name": "wechat-html-merger",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Merge two WechatExplorer HTML archives into one incrementally refreshable archive.",
+  "bin": {
+    "wechat-html-merger": "src/cli.mjs"
+  },
+  "scripts": {
+    "check": "node --check src/merge.mjs && node --check src/cli.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
