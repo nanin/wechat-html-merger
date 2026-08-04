@@ -15,6 +15,7 @@ import {
 } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import { finished } from 'node:stream/promises'
+import { renderArchivePage } from './archive-template.mjs'
 
 const ARCHIVE_ASSIGNMENT = 'window.__WECHAT_EXPORT__ = '
 const CONFIG_FILE = 'merge-config.json'
@@ -133,14 +134,12 @@ const parseArchiveSource = (source, dataPath) => {
 export async function readHtmlArchive(rootPath) {
   const root = resolve(rootPath)
   const dataPath = join(root, 'data', 'messages.js')
-  const indexPath = join(root, 'index.html')
   let source = await readFile(dataPath, 'utf8')
   const archive = parseArchiveSource(source, dataPath)
   source = ''
-  const indexStat = await stat(indexPath)
   const sourceId = String(archive.sourceId || '').trim()
   if (!sourceId) throw new Error(`档案缺少 sourceId：${dataPath}`)
-  return { archive, dataPath, indexPath, indexMtimeMs: indexStat.mtimeMs, root, sourceId }
+  return { archive, dataPath, root, sourceId }
 }
 
 const archiveMessageTime = (message) => {
@@ -253,9 +252,9 @@ const patchIndexTemplate = (html, name) => {
       `$1${escapedName}$2`
     )
   const styledHtml = namedHtml.replace(/<\/style>/i, `${LOADING_STYLE}\n</style>`)
-  if (styledHtml === namedHtml) throw new Error('源档案页面缺少样式标签，无法添加加载状态')
+  if (styledHtml === namedHtml) throw new Error('内置档案页面缺少样式标签，无法添加加载状态')
   const markedHtml = styledHtml.replace(/<body>/i, `<body>${LOADING_MARKUP}`)
-  if (markedHtml === styledHtml) throw new Error('源档案页面缺少 body，无法添加加载状态')
+  if (markedHtml === styledHtml) throw new Error('内置档案页面缺少 body，无法添加加载状态')
 
   const scriptPattern =
     /<script\s+src=["']data\/messages\.js["']><\/script>\s*<script>([\s\S]*?)<\/script>\s*(?=<\/body>)/i
@@ -301,15 +300,15 @@ ${runtime}
   </script>
 `)
   if (bootstrappedHtml === markedHtml) {
-    throw new Error('无法替换源档案中的消息加载脚本，请先重新导出源档案')
+    throw new Error('无法替换内置档案页面中的消息加载脚本')
   }
   return bootstrappedHtml
 }
 
-const writeIndex = async (outputPath, templatePath, name) => {
+const writeIndex = async (outputPath, name) => {
   const destinationPath = join(outputPath, 'index.html')
   const temporaryPath = `${destinationPath}.tmp-${process.pid}`
-  const html = patchIndexTemplate(await readFile(templatePath, 'utf8'), name)
+  const html = patchIndexTemplate(renderArchivePage(name), name)
   await writeFile(temporaryPath, html, 'utf8')
   await replaceFileAtomically(temporaryPath, destinationPath, true)
 }
@@ -445,10 +444,7 @@ const mergeSources = async ({ createdAt, name, outputPath, sourceConfigs }) => {
     }))
   }
   await writeArchive(output, archiveMetadata, messages)
-  const templateSource = [...sources].sort(
-    (left, right) => right.indexMtimeMs - left.indexMtimeMs
-  )[0]
-  await writeIndex(output, templateSource.indexPath, name)
+  await writeIndex(output, name)
 
   const config = {
     version: 1,
